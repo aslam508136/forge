@@ -81,7 +81,7 @@ const isPg = !!DATABASE_URL;
 
 async function init() {
   if (isPg) {
-    pool = pg.createPool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
+    pool = new pg.Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 10 });
     await pool.query(toPgSafe(SCHEMA));
     for (const t of ['aws_profiles', 'instance_schedules', 'instance_auto_config']) {
       await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS sb_ref TEXT`);
