@@ -83,7 +83,8 @@ function toPgSafe(sql) {
   return sql
     .replace(/datetime\('now'\)/g, 'now()')
     .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/g, 'SERIAL PRIMARY KEY')
-    .replace(/INTEGER NOT NULL DEFAULT/g, 'BOOLEAN NOT NULL DEFAULT');
+    .replace(/INTEGER NOT NULL DEFAULT 1/g, 'BOOLEAN NOT NULL DEFAULT true')
+    .replace(/INTEGER NOT NULL DEFAULT 0/g, 'BOOLEAN NOT NULL DEFAULT false');
 }
 
 function toSqliteSafe(sql) {
