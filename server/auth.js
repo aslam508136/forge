@@ -126,4 +126,16 @@ router.post('/login', async (req, res) => {
   }
 });
 
+router.post('/update', authRequired, async (req, res) => {
+  const { password } = req.body || {};
+  if (!password || password.length < 6) return res.status(400).json({ error: 'Password at least 6 characters ka hona chahiye' });
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    await db.query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, req.user.id]);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 export default router;

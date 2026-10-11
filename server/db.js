@@ -53,6 +53,30 @@ CREATE TABLE IF NOT EXISTS instance_auto_config (
 
 CREATE INDEX IF NOT EXISTS idx_schedules_profile ON instance_schedules(profile_id);
 CREATE INDEX IF NOT EXISTS idx_auto_config_profile ON instance_auto_config(profile_id);
+
+CREATE TABLE IF NOT EXISTS user_blobs (
+  user_id INTEGER NOT NULL,
+  key TEXT NOT NULL,
+  data TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS user_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT,
+  email TEXT,
+  type TEXT,
+  at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS aws_mirror (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT UNIQUE,
+  email TEXT,
+  profiles TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT DEFAULT (datetime('now'))
+);
 `;
 
 const DATABASE_URL = internalizePgUrl(process.env.DATABASE_URL);

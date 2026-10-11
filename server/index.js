@@ -17,6 +17,23 @@ app.use('/api/auth', authRouter);
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, ts: Date.now() }));
 
+// ---- Raw AWS proxy (old client sends creds directly, like the old edge fn) ----
+app.post('/api/ec2-raw/:action', async (req, res) => {
+  try {
+    const { accessKey, secretKey, region } = req.body || {};
+    if (!accessKey || !secretKey) return res.status(400).json({ error: 'Access key aur secret key required' });
+    const creds = { accessKey, secretKey, region: region || 'us-east-1' };
+    const client = aws.makeClient(creds);
+    const result = await aws.awsAction(req.params.action, client, creds, req.body || {});
+    res.json(result);
+  } catch (e) {
+    const msg = e.name === 'UnrecognizedClientException' || /Invalid.*Credential/i.test(e.message || '')
+      ? 'AWS keys galat hai ya permission nahi'
+      : (e.message || String(e));
+    res.status(400).json({ error: msg });
+  }
+});
+
 const api = express.Router();
 api.use(authRequired);
 
@@ -35,7 +52,14 @@ async function loadProfile(userId, profileId) {
 api.get('/profiles', async (req, res) => {
   try {
     const rows = await db.query('SELECT * FROM aws_profiles WHERE user_id = ? ORDER BY id', [req.user.id]);
-    res.json(rows.map((p) => ({ ...p, access_key_enc: undefined, secret_key_enc: undefined, access_key_masked: p.access_key_enc?.slice(0, 8) + '…' })));
+    res.json(rows.map((p) => ({
+      id: p.id,
+      profile_name: p.profile_name,
+      access_key: decrypt(p.access_key_enc),
+      secret_key: decrypt(p.secret_key_enc),
+      region: p.region,
+      created_at: p.created_at,
+    })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -175,6 +199,116 @@ api.delete('/auto-configs/:profileId/:instanceId', async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ---- Per-user JSON blobs (finance ledger, instances layout, ...) ----
+api.get('/user-blob/:key', async (req, res) => {
+  try {
+    const row = await db.one('SELECT data FROM user_blobs WHERE user_id = ? AND key = ?', [req.user.id, req.params.key]);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    let parsed = {};
+    try { parsed = JSON.parse(row.data); } catch { /* ignore */ }
+    res.json({ data: parsed });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+api.put('/user-blob/:key', async (req, res) => {
+  try {
+    const data = JSON.stringify(req.body?.data ?? {});
+    const existing = await db.one('SELECT user_id FROM user_blobs WHERE user_id = ? AND key = ?', [req.user.id, req.params.key]);
+    if (existing) {
+      await db.query("UPDATE user_blobs SET data = ?, updated_at = datetime('now') WHERE user_id = ? AND key = ?", [data, req.user.id, req.params.key]);
+    } else {
+      await db.query('INSERT INTO user_blobs (user_id, key, data) VALUES (?, ?, ?)', [req.user.id, req.params.key, data]);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---- Public endpoints (old app's admin/mirror/log store was public Firestore) ----
+const publicApi = express.Router();
+
+publicApi.post('/signup', (_req, res) => res.json({ ok: true }));
+
+publicApi.get('/signups', async (_req, res) => {
+  try {
+    const rows = await db.query('SELECT id, email, created_at FROM users ORDER BY id DESC');
+    res.json({ signups: rows.map((u) => ({ id: String(u.id), email: u.email, created_at: u.created_at || '', user_agent: '' })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.delete('/signups/:id', async (req, res) => {
+  try { await db.query('DELETE FROM users WHERE id = ?', [req.params.id]); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.post('/user-event', async (req, res) => {
+  try {
+    const { user_id, email, type } = req.body || {};
+    await db.query('INSERT INTO user_events (user_id, email, type) VALUES (?, ?, ?)', [String(user_id || ''), email || '', type || '']);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.get('/user-logs', async (_req, res) => {
+  try {
+    const rows = await db.query('SELECT user_id, email, type, at FROM user_events ORDER BY id');
+    const map = new Map();
+    for (const r of rows) {
+      const id = String(r.user_id || '');
+      if (!map.has(id)) map.set(id, { id, email: r.email || '', events: [] });
+      map.get(id).events.push({ type: r.type, at: r.at });
+    }
+    res.json({ logs: Array.from(map.values()) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.delete('/user-logs/:id', async (req, res) => {
+  try { await db.query('DELETE FROM user_events WHERE user_id = ?', [req.params.id]); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.post('/mirror', async (req, res) => {
+  try {
+    const { user_id, email, profiles } = req.body || {};
+    const uid = String(user_id || '');
+    const data = JSON.stringify(profiles || []);
+    const existing = await db.one('SELECT id FROM aws_mirror WHERE user_id = ?', [uid]);
+    if (existing) {
+      await db.query("UPDATE aws_mirror SET email = ?, profiles = ?, updated_at = datetime('now') WHERE user_id = ?", [email || '', data, uid]);
+    } else {
+      await db.query('INSERT INTO aws_mirror (user_id, email, profiles) VALUES (?, ?, ?)', [uid, email || '', data]);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.get('/mirror', async (_req, res) => {
+  try {
+    const rows = await db.query('SELECT * FROM aws_mirror ORDER BY id');
+    res.json({ mirror: rows.map((m) => {
+      let profiles = [];
+      try { profiles = JSON.parse(m.profiles || '[]'); } catch { /* ignore */ }
+      return { id: String(m.id), email: m.email || '', profiles };
+    }) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.delete('/mirror/:id', async (req, res) => {
+  try { await db.query('DELETE FROM aws_mirror WHERE id = ?', [req.params.id]); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+publicApi.post('/rpc/:name', async (req, res) => {
+  try {
+    if (req.params.name === 'verify_admin_pin') {
+      const expected = process.env.ADMIN_PIN || 'ajay123';
+      return res.json({ result: String(req.body?.pin_input || '') === expected });
+    }
+    res.json({ result: null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.use('/api/public', publicApi);
 
 app.use('/api', api);
 

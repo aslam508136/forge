@@ -16,6 +16,9 @@ import {
   AttachVolumeCommand,
   DetachVolumeCommand,
   ModifyInstanceAttributeCommand,
+  ModifyImageAttributeCommand,
+  CreateKeyPairCommand,
+  GetPasswordDataCommand,
   DescribeInstanceTypeOfferingsCommand,
   DescribeInstanceStatusCommand,
   DescribeKeyPairsCommand,
@@ -23,6 +26,8 @@ import {
   DescribeSubnetsCommand,
 } from '@aws-sdk/client-ec2';
 import { ServiceQuotasClient, ListServiceQuotasCommand } from '@aws-sdk/client-service-quotas';
+import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import crypto from 'node:crypto';
 
 export function makeClient({ accessKey, secretKey, region }) {
   return new EC2Client({
@@ -58,10 +63,11 @@ export async function listInstances(c, { query = {} } = {}) {
         name,
         state: i.State?.Name || '',
         type: i.InstanceType,
-        public_ip: i.PublicIpAddress || '',
-        private_ip: i.PrivateIpAddress || '',
+        public_ip: i.PublicIpAddress || '—',
+        private_ip: i.PrivateIpAddress || '—',
         platform,
         az: i.Placement?.AvailabilityZone || '',
+        launched: i.LaunchTime ? new Date(i.LaunchTime).toISOString() : '',
       });
     }
   }
@@ -170,6 +176,7 @@ export async function getQuotas(_c, { region, accessKey, secretKey }) {
 export async function listAmis(c, { owner, shared = false, query = {} } = {}) {
   const owners = [];
   if (owner) owners.push(owner);
+  else if (!shared) owners.push('self');
   if (shared) owners.push('amazon', 'aws-marketplace');
   const out = await c.send(new DescribeImagesCommand({
     ...query,
@@ -182,6 +189,7 @@ export async function listAmis(c, { owner, shared = false, query = {} } = {}) {
     state: i.State,
     created: i.CreationDate || '',
     arch: i.Architecture || '',
+    rootDevice: i.RootDeviceName || '',
   }));
 }
 
@@ -282,15 +290,96 @@ export async function instanceStatus(c, ids) {
   return Object.fromEntries((out.InstanceStatuses || []).map((s) => [s.InstanceId, s.InstanceState?.Name || '']));
 }
 
+export async function getAccountId({ accessKey, secretKey, region }) {
+  const sts = new STSClient({
+    region: region || 'us-east-1',
+    credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
+  });
+  const out = await sts.send(new GetCallerIdentityCommand({}));
+  return out.Account;
+}
+
+export async function createKeyPair(c, { keyName }) {
+  const out = await c.send(new CreateKeyPairCommand({ KeyName: keyName, KeyType: 'rsa', KeyFormat: 'pem' }));
+  return { keyName: out.KeyName, keyMaterial: out.KeyMaterial, keyPairId: out.KeyPairId };
+}
+
+export async function shareAmi(c, { amiId, targetAccountId }) {
+  await c.send(new ModifyImageAttributeCommand({
+    ImageId: amiId,
+    LaunchPermission: { Add: [{ UserId: targetAccountId }] },
+  }));
+  return `Shared ${amiId} with ${targetAccountId}`;
+}
+
+export async function getWindowsPassword(c, { instanceId, pemContent }) {
+  const out = await c.send(new GetPasswordDataCommand({ InstanceId: instanceId }));
+  if (!out.PasswordData) return null;
+  const encrypted = Buffer.from(out.PasswordData, 'base64');
+  const key = crypto.createPrivateKey(pemContent);
+  const decrypted = crypto.privateDecrypt({ key, padding: crypto.constants.RSA_PKCS1_PADDING }, encrypted);
+  return decrypted.toString('utf8');
+}
+
+const OS_AMI = {
+  'amazon-linux:2023': { owner: 'amazon', name: 'al2023-ami-2023.*-x86_64' },
+  'amazon-linux:2': { owner: 'amazon', name: 'amzn2-ami-hvm-*-x86_64-gp2' },
+  'ubuntu:22.04': { owner: '099720109477', name: 'ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' },
+  'ubuntu:20.04': { owner: '099720109477', name: 'ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*' },
+  'windows:2025': { owner: 'amazon', name: 'Windows_Server-2025-English-Full-Base-*' },
+  'windows:2022': { owner: 'amazon', name: 'Windows_Server-2022-English-Full-Base-*' },
+  'windows:2019': { owner: 'amazon', name: 'Windows_Server-2019-English-Full-Base-*' },
+};
+
+async function resolveAmi(c, os, version) {
+  const spec = OS_AMI[`${os}:${version}`];
+  if (!spec) return null;
+  const out = await c.send(new DescribeImagesCommand({
+    Owners: [spec.owner],
+    Filters: [{ Name: 'name', Values: [spec.name] }, { Name: 'state', Values: ['available'] }],
+  }));
+  const imgs = (out.Images || []).sort((a, b) => new Date(b.CreationDate || 0).getTime() - new Date(a.CreationDate || 0).getTime());
+  return imgs[0]?.ImageId || null;
+}
+
+export async function launchFromConfig(c, { config }) {
+  const cfg = config || {};
+  let ami = cfg.amiId;
+  if (!ami || ami === '__select__') {
+    ami = await resolveAmi(c, cfg.os || 'amazon-linux', cfg.version || '2023');
+  }
+  if (!ami) throw new Error('AMI resolve nahi hui — OS/version check karo ya custom AMI ID do');
+  const params = {
+    ImageId: ami,
+    InstanceType: cfg.instanceType || 't2.micro',
+    MinCount: Math.max(1, Number(cfg.count) || 1),
+    MaxCount: Math.max(1, Number(cfg.count) || 1),
+    KeyName: cfg.keyPair || undefined,
+    BlockDeviceMappings: cfg.rootSize
+      ? [{ DeviceName: '/dev/sda1', Ebs: { VolumeSize: Number(cfg.rootSize), VolumeType: cfg.rootType || 'gp3' } }]
+      : undefined,
+  };
+  if (cfg.spot) params.InstanceMarketOptions = { MarketType: 'spot' };
+  const out = await c.send(new RunInstancesCommand(params));
+  const ids = (out.Instances || []).map((i) => i.InstanceId);
+  if (cfg.name && ids.length) {
+    try {
+      await c.send(new CreateTagsCommand({ Resources: ids, Tags: [{ Key: 'Name', Value: cfg.name }] }));
+    } catch { /* ignore */ }
+  }
+  return ids;
+}
+
 export async function awsAction(action, client, creds, payload) {
   switch (action) {
     case 'list-instances': return { instances: await listInstances(client, payload) };
     case 'list-amis': return { amis: await listAmis(client, payload) };
     case 'list-volumes': return { volumes: await listVolumes(client, payload) };
-    case 'list-key-pairs': return { keys: await listKeyPairs(client) };
+    case 'list-key-pairs': { const kp = await listKeyPairs(client); return { keys: kp, keyPairs: kp }; }
     case 'list-security-groups': return { groups: await listSecurityGroups(client) };
     case 'list-subnets': return { subnets: await listSubnets(client) };
     case 'get-quotas': return { quotas: await getQuotas(client, creds) };
+    case 'get-account-id': return { accountId: await getAccountId(creds) };
     case 'start-instances': return { message: await startInstances(client, payload.instanceIds || []) };
     case 'stop-instances': return { message: await stopInstances(client, payload.instanceIds || []) };
     case 'reboot-instances': return { message: await rebootInstances(client, payload.instanceIds || []) };
@@ -298,9 +387,14 @@ export async function awsAction(action, client, creds, payload) {
     case 'rename-instance': return { message: await renameInstance(client, payload) };
     case 'modify-instance-type': return { message: await modifyInstanceType(client, payload) };
     case 'shrink-instance-type': return { message: await shrinkInstanceType(client, payload) };
+    case 'create-ami': return { imageId: await createImage(client, payload) };
     case 'create-image': return { imageId: await createImage(client, payload) };
+    case 'delete-ami': return { message: await deleteAmi(client, [payload.amiId].filter(Boolean)) };
     case 'delete-amis': return { message: await deleteAmi(client, payload.instanceIds || []) };
-    case 'launch-instance': return { ids: await launchInstance(client, payload) };
+    case 'share-ami': return { message: await shareAmi(client, payload) };
+    case 'create-key-pair': return { ...(await createKeyPair(client, payload)) };
+    case 'get-password': return { password: await getWindowsPassword(client, payload) };
+    case 'launch-instance': return { ids: await launchFromConfig(client, payload) };
     case 'create-volume': return { volumeId: await createVolume(client, payload) };
     case 'delete-volumes': return { message: await deleteVolume(client, payload.instanceIds || []) };
     case 'attach-volume': return { message: await attachVolume(client, payload) };
