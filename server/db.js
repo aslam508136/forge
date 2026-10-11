@@ -55,7 +55,23 @@ CREATE INDEX IF NOT EXISTS idx_schedules_profile ON instance_schedules(profile_i
 CREATE INDEX IF NOT EXISTS idx_auto_config_profile ON instance_auto_config(profile_id);
 `;
 
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL = internalizePgUrl(process.env.DATABASE_URL);
+
+// Render free Postgres blocks public/external connections (IP allow list).
+// When running on Render, rewrite the external host to the private/internal one.
+function internalizePgUrl(url) {
+  if (!url) return url;
+  try {
+    const u = new URL(url);
+    const m = u.hostname.match(/^([a-z0-9-]+)\.[a-z0-9-]+-postgres\.render\.com$/i);
+    if (m && process.env.RENDER) {
+      u.hostname = m[1];
+      u.port = '';
+      return u.toString();
+    }
+  } catch { /* ignore */ }
+  return url;
+}
 
 // NOTE: sqlite path is used for local dev; Render Postgres uses DATABASE_URL.
 // To keep SQL compatible across both, we use a light dialect mapping.
