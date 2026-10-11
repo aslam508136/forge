@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS aws_profiles (
   access_key_enc TEXT NOT NULL,
   secret_key_enc TEXT NOT NULL,
   region TEXT NOT NULL DEFAULT 'ap-south-1',
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TEXT DEFAULT (datetime('now')),
+  sb_ref TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instance_schedules (
@@ -30,7 +31,8 @@ CREATE TABLE IF NOT EXISTS instance_schedules (
   time TEXT NOT NULL,
   instance_ids TEXT NOT NULL DEFAULT '[]',
   enabled INTEGER NOT NULL DEFAULT 1,
-  last_fired TEXT
+  last_fired TEXT,
+  sb_ref TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instance_auto_config (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS instance_auto_config (
   last_off_fired TEXT,
   shrunk_on TEXT,
   created_at TEXT DEFAULT (datetime('now')),
+  sb_ref TEXT,
   UNIQUE (profile_id, instance_id)
 );
 
@@ -80,6 +83,9 @@ async function init() {
   if (isPg) {
     pool = pg.createPool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
     await pool.query(toPgSafe(SCHEMA));
+    for (const t of ['aws_profiles', 'instance_schedules', 'instance_auto_config']) {
+      await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS sb_ref TEXT`);
+    }
   } else {
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
     const dir = path.resolve(__dirname, '..', 'data');
@@ -88,13 +94,19 @@ async function init() {
     sqlite.exec('PRAGMA journal_mode = WAL;');
     sqlite.exec('PRAGMA foreign_keys = ON;');
     sqlite.exec(toSqliteSafe(SCHEMA));
-    // idempotent migration for older local db files
-    try {
-      const cols = sqlite.prepare("PRAGMA table_info('instance_auto_config')").all().map((c) => c.name);
-      if (!cols.includes('shrunk_on')) {
-        sqlite.exec("ALTER TABLE instance_auto_config ADD COLUMN shrunk_on TEXT");
-      }
-    } catch { /* ignore */ }
+    // idempotent migrations for older local db files
+    const migs = [
+      ['instance_auto_config', 'shrunk_on'],
+      ['aws_profiles', 'sb_ref'],
+      ['instance_schedules', 'sb_ref'],
+      ['instance_auto_config', 'sb_ref'],
+    ];
+    for (const [table, col] of migs) {
+      try {
+        const cols = sqlite.prepare(`PRAGMA table_info('${table}')`).all().map((c) => c.name);
+        if (!cols.includes(col)) sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${col} TEXT`);
+      } catch { /* ignore */ }
+    }
   }
   console.log(`[db] ${isPg ? 'Postgres (Render)' : 'SQLite (local)'} ready`);
 }
