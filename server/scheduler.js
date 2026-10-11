@@ -42,7 +42,7 @@ async function runScheduler() {
   const now = istNow();
 
   // Part 1: fixed schedules
-  const schedules = await db.query('SELECT * FROM instance_schedules WHERE enabled = 1');
+  const schedules = await db.query('SELECT * FROM instance_schedules WHERE enabled = ?', [true]);
   for (const row of schedules) {
     if (row.time !== now.hhmm) continue;
     if (sameDay(row.last_fired, now.date)) continue;
@@ -61,7 +61,7 @@ async function runScheduler() {
   }
 
   // Part 2: per-instance auto config
-  const configs = await db.query('SELECT * FROM instance_auto_config WHERE auto_enabled = 1');
+  const configs = await db.query('SELECT * FROM instance_auto_config WHERE auto_enabled = ?', [true]);
   const byProfile = {};
   for (const c of configs) (byProfile[c.profile_id] = byProfile[c.profile_id] || []).push(c);
 

@@ -51,7 +51,7 @@ async function importOldData(userId, sbToken) {
     if (dup) continue;
     await db.query(
       'INSERT INTO instance_schedules (profile_id, name, action, time, instance_ids, enabled, last_fired, sb_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [np, s.name || 'Schedule', s.action || 'start', s.time || '09:00', JSON.stringify(s.instance_ids || []), s.enabled === false ? 0 : 1, s.last_fired || null, String(s.id)]
+      [np, s.name || 'Schedule', s.action || 'start', s.time || '09:00', JSON.stringify(s.instance_ids || []), s.enabled === false ? false : true, s.last_fired || null, String(s.id)]
     );
   }
 
@@ -63,7 +63,7 @@ async function importOldData(userId, sbToken) {
     if (dup) continue;
     await db.query(
       'INSERT INTO instance_auto_config (profile_id, instance_id, auto_enabled, on_time, off_time, shrink_enabled, last_on_fired, last_off_fired, sb_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [np, a.instance_id || '', a.auto_enabled ? 1 : 0, a.on_time || null, a.off_time || null, a.shrink_enabled ? 1 : 0, a.last_on_fired || null, a.last_off_fired || null, String(a.id)]
+      [np, a.instance_id || '', !!a.auto_enabled, a.on_time || null, a.off_time || null, !!a.shrink_enabled, a.last_on_fired || null, a.last_off_fired || null, String(a.id)]
     );
   }
 }

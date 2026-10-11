@@ -136,11 +136,12 @@ const db = {
       const r = await pool.query(pgText, params);
       return r.rows;
     }
+    const bound = params.map((p) => (typeof p === 'boolean' ? (p ? 1 : 0) : p));
     const stmt = sqlite.prepare(text);
     if (/^\s*select/i.test(text)) {
-      return stmt.all(...params);
+      return stmt.all(...bound);
     }
-    stmt.run(...params);
+    stmt.run(...bound);
     return [];
   },
   async one(text, params = []) {
