@@ -25,7 +25,7 @@ import {
   DescribeSecurityGroupsCommand,
   DescribeSubnetsCommand,
 } from '@aws-sdk/client-ec2';
-import { ServiceQuotasClient, ListServiceQuotasCommand } from '@aws-sdk/client-service-quotas';
+import { ServiceQuotasClient, ListServiceQuotasCommand, GetServiceQuotaCommand, GetAWSDefaultServiceQuotaCommand } from '@aws-sdk/client-service-quotas';
 import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import crypto from 'node:crypto';
 
@@ -146,30 +146,47 @@ export async function shrinkInstanceType(c, { instanceId, region }) {
 }
 
 export async function getQuotas(_c, { region, accessKey, secretKey }) {
-  const sq = new ServiceQuotasClient({
-    region,
+  const quotasClient = new ServiceQuotasClient({
     credentials: { accessKeyId: accessKey, secretAccessKey: secretKey },
+    region: region || 'ap-south-1',
   });
-  const codes = [
-    { code: 'L-1216C47A', name: 'Running On-Demand EC2 vCPU' },
-    { code: 'L-1234567890', name: 'EC2 Instances' },
-  ];
-  const quotas = [];
-  for (const cde of codes) {
+
+  // Try multiple APIs so the value resolves even with partial IAM permissions.
+  async function resolveQuota(code, name) {
+    // 1) Applied quota (best)
     try {
-      const out = await sq.send(new ListServiceQuotasCommand({ ServiceCode: 'ec2' }));
-      const found = (out.Quotas || []).find((q) => q.QuotaCode === cde.code || q.QuotaName === cde.name);
-      if (found) quotas.push({ code: found.QuotaCode, name: found.QuotaName, value: found.Value });
-    } catch { /* skip */ }
-  }
-  try {
-    const out = await sq.send(new ListServiceQuotasCommand({ ServiceCode: 'ec2' }));
-    for (const q of out.Quotas || []) {
-      if (!quotas.find((x) => x.code === q.QuotaCode)) {
-        quotas.push({ code: q.QuotaCode, name: q.QuotaName, value: q.Value });
+      const resp = await quotasClient.send(new GetServiceQuotaCommand({ ServiceCode: 'ec2', QuotaCode: code }));
+      const v = resp.Quota?.Value;
+      if (v != null && v > 0) {
+        return { code, name, value: v, unit: resp.Quota?.Unit || 'None', adjustable: resp.Quota?.Adjustable };
       }
-    }
-  } catch { /* skip */ }
+    } catch { /* continue */ }
+    // 2) ListServiceQuotas (works with broader read-only perms), paginated
+    try {
+      let nextToken;
+      do {
+        const listResp = await quotasClient.send(new ListServiceQuotasCommand({ ServiceCode: 'ec2', NextToken: nextToken }));
+        for (const q of listResp.Quotas || []) {
+          if (q.QuotaCode === code && q.Value != null && q.Value > 0) {
+            return { code, name, value: q.Value, unit: q.Unit || 'None', adjustable: q.Adjustable };
+          }
+        }
+        nextToken = listResp.NextToken;
+      } while (nextToken);
+    } catch { /* continue */ }
+    // 3) AWS default quota (fallback)
+    try {
+      const resp = await quotasClient.send(new GetAWSDefaultServiceQuotaCommand({ ServiceCode: 'ec2', QuotaCode: code }));
+      const v = resp.Quota?.Value;
+      if (v != null && v > 0) {
+        return { code, name, value: v, unit: resp.Quota?.Unit || 'None', adjustable: false, isDefault: true };
+      }
+    } catch { /* continue */ }
+    return { code, name, value: 0, unit: 'None', adjustable: false };
+  }
+
+  const main = await resolveQuota('L-1216C47A', 'Running On-Demand Standard instances');
+  const quotas = main.value > 0 ? [main] : [];
   return quotas;
 }
 
