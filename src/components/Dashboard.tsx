@@ -28,6 +28,14 @@ interface Quota {
 
 type Tab = 'instances' | 'volumes' | 'amis' | 'launch' | 'schedules';
 
+const RESIZE_TYPES = [
+  't2.micro', 't2.small', 't2.medium',
+  't3.micro', 't3.small', 't3.medium',
+  'm5.large', 'm5.xlarge', 'm5.2xlarge',
+  'c5.large', 'c5.xlarge', 'c5.2xlarge',
+  'z1d.large', 'z1d.xlarge',
+];
+
 export default function Dashboard({ profile, profiles, onBack }: { profile: AwsProfile; profiles: AwsProfile[]; onBack: () => void }) {
   const { isDark, toggleTheme } = useTheme();
   const [tab, setTab] = useState<Tab>('instances');
@@ -50,6 +58,8 @@ export default function Dashboard({ profile, profiles, onBack }: { profile: AwsP
   const [autoConfigs, setAutoConfigs] = useState<Record<string, InstanceAutoConfig>>({});
   const [sizeInstance, setSizeInstance] = useState<Instance | null>(null);
   const [sizeBusy, setSizeBusy] = useState(false);
+  const [resizeType, setResizeType] = useState('t2.micro');
+  const [resizeCustomValue, setResizeCustomValue] = useState('');
   const [autoEditing, setAutoEditing] = useState<Instance | null>(null);
   const [autoAutoEnabled, setAutoAutoEnabled] = useState(true);
   const [autoOnTime, setAutoOnTime] = useState('09:00');
@@ -145,8 +155,8 @@ export default function Dashboard({ profile, profiles, onBack }: { profile: AwsP
   async function handleResize() {
     const inst = sizeInstance;
     if (!inst) return;
-    const type = (document.getElementById('resize-type') as HTMLSelectElement)?.value;
-    if (!type) { showToast('Select an instance type'); return; }
+    const type = resizeType === 'custom' ? resizeCustomValue.trim() : resizeType;
+    if (!type) { showToast(resizeType === 'custom' ? 'Custom instance type likho (e.g. c5.2xlarge)' : 'Select an instance type'); return; }
     setSizeBusy(true);
     try {
       await callAwsApi('modify-instance-type', { ...creds, instanceId: inst.id, instanceType: type });
@@ -162,6 +172,13 @@ export default function Dashboard({ profile, profiles, onBack }: { profile: AwsP
 
   function openSizeModal(inst: Instance) {
     setSizeInstance(inst);
+    if (RESIZE_TYPES.includes(inst.type)) {
+      setResizeType(inst.type);
+      setResizeCustomValue('');
+    } else {
+      setResizeType('custom');
+      setResizeCustomValue(inst.type);
+    }
   }
 
   function openAutoModal(inst: Instance) {
@@ -593,7 +610,7 @@ export default function Dashboard({ profile, profiles, onBack }: { profile: AwsP
             )}
             <div className="form-group">
               <label>New Instance Type</label>
-              <select id="resize-type" defaultValue={['t2.micro', 't2.small', 't2.medium', 't3.micro', 't3.small', 't3.medium', 'm5.large', 'm5.xlarge', 'c5.large', 'c5.xlarge'].includes(sizeInstance.type) ? sizeInstance.type : 't2.micro'}>
+              <select value={resizeType} onChange={(e) => setResizeType(e.target.value)}>
                 <optgroup label="Sabse sasta">
                   <option value="t2.micro">t2.micro (1 vCPU, 1GB)</option>
                   <option value="t2.small">t2.small (1 vCPU, 2GB)</option>
@@ -616,7 +633,19 @@ export default function Dashboard({ profile, profiles, onBack }: { profile: AwsP
                   <option value="z1d.large">z1d.large (2 vCPU, 32GB)</option>
                   <option value="z1d.xlarge">z1d.xlarge (4 vCPU, 64GB)</option>
                 </optgroup>
+                <optgroup label="Custom">
+                  <option value="custom">Custom — apna type likho</option>
+                </optgroup>
               </select>
+              {resizeType === 'custom' && (
+                <input
+                  value={resizeCustomValue}
+                  onChange={(e) => setResizeCustomValue(e.target.value)}
+                  placeholder="e.g. c5.2xlarge, r5.xlarge, p3.2xlarge"
+                  style={{ marginTop: 8 }}
+                  autoFocus
+                />
+              )}
               <small style={{ color: 'var(--text-muted)', marginTop: 4, display: 'block' }}>
                 Ye manual button hai — AUTO ON ho ya OFF, hamesha chalta rahega.
               </small>
