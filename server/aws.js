@@ -102,15 +102,17 @@ export async function renameInstance(c, { instanceId, name }) {
   return `Renamed: ${name}`;
 }
 
-export async function modifyInstanceType(c, { instanceId, type }) {
+export async function modifyInstanceType(c, { instanceId, instanceType, type }) {
+  const target = (instanceType || type || '').trim();
+  if (!target) throw new Error('Instance type required');
   const curr = await listInstances(c, { query: { Filters: [{ Name: 'instance-id', Values: [instanceId] }] } });
   if (!curr.length) throw new Error('Instance nahi mila');
   if (curr[0].state !== 'stopped') {
     throw new Error('Type badalne ke liye instance pehle STOP karo');
   }
-  if (curr[0].type === type) return 'Ye type already set hai';
-  await c.send(new ModifyInstanceAttributeCommand({ InstanceId: instanceId, InstanceType: { Value: type } }));
-  return `${instanceId} → ${type}`;
+  if (curr[0].type === target) return 'Ye type already set hai';
+  await c.send(new ModifyInstanceAttributeCommand({ InstanceId: instanceId, InstanceType: { Value: target } }));
+  return `${instanceId} → ${target}`;
 }
 
 export async function shrinkInstanceType(c, { instanceId, region }) {
